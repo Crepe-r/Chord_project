@@ -1,60 +1,84 @@
 import parser1 as p1
 import parser2 as p2
 
-NOTES = ['ab','a','a#','bb','b','c','c#','db','d','d#','eb','e','f','f#','gb','g','g#']
+NOTES = ['AB', 'A', 'A#', 'BB', 'B', 'C', 'C#', 'DB', 'D', 'D#', 'EB', 'E', 'F', 'F#', 'GB', 'G', 'G#']
+
 
 def compare_count(c1, c2):
-    for offset in range(0,17):
-        summa = 0
+    """Сравнивает последовательности аккордов с учётом  сдвига"""
+    n = len(c1)
+    for offset in range(n):
+        c2_rotated = c2[offset:] + c2[:offset]
+        
+        summa = 0.0
         count = 0
-        for i in range(17):
-            if (c1[i]*(c2[offset:] + c2[:offset-1])[i]):
-                summa += c1[i]/c2[i]
+        
+        for i in range(n):
+            val1 = c1[i]
+            val2 = c2_rotated[i]
+            
+            if val1 > 0 and val2 > 0:
+                summa += val1 / val2
                 count += 1
-            elif (c1[i] + c2[i] > 10):
-                break
-        if 1.4 > ((summa/count) if count != 0 else 0) > 0.6:
+                
+        if count == 0:
+            continue
+            
+        ratio = summa / count
+        if 0.6 < ratio < 1.4:
             return True
+            
     return False
 
 
 def chord_counter(chords):
-    chord_count = []
-    for note in NOTES:
-        chord_count.append(chords.count(note))
-    return chord_count
+    """Считает частоту каждой ноты из списка аккордов"""
+    chords_upper = [c.upper() for c in chords]
+    return [chords_upper.count(note) for note in NOTES]
+
 
 def compare_chords(chords_data):
-    selected_chords_ind = []
+    """Группирует варианты аккордов по схожести и выбирает лучшую группу"""
+    if len(chords_data) <= 1:
+        return 0  # Если вариант один — возвращаем его
 
-    chords_count = []
-    for chords in chords_data:
-        chords_count.append(chord_counter(chords[0]))
+    chords_count = [chord_counter(chords) for chords in chords_data]
     
-    selected_chords_ind.append(0)
+    selected_indices = [0]
+    selected_counts = [1]
 
-    for ch_ind in range(len(chords_count)):
-        if ch_ind not in selected_chords_ind:
-            for sel_ind in selected_chords_ind:
-                if compare_count(chords_count[ch_ind], chords_count[sel_ind]):
-                    break
-                else:
-                    selected_chords_ind.append(ch_ind)
-    return [chords_data[i] for i in selected_chords_ind]
+    # Начинаем с 1, т.к. 0 уже добавлен в selected_indices
+    for ch_ind in range(1, len(chords_count)):
+        matched = False
+        for idx, sel_ind in enumerate(selected_indices):
+            if compare_count(chords_count[ch_ind], chords_count[sel_ind]):
+                selected_counts[idx] += 1
+                matched = True
+                break
+        if not matched:
+            selected_indices.append(ch_ind)
+            selected_counts.append(1)
+
+    # Возвращаем индекс варианта из самой многочисленной группы
+    max_count = max(selected_counts)
+    best_group_idx = selected_counts.index(max_count)
+    return selected_indices[best_group_idx]
     
 
 def song_handler(query: str):
-    songs_data = []
+    songs_data = [p1.search_song(query), p2.search_song(query)]
+    songs_data = [s for s in songs_data if s is not None]
+    
+    if not songs_data:
+        return None
 
-    songs_data.append(p1.search_song(query))
-    songs_data.append(p2.search_song(query))
-
-    # print(songs_data)
-    songs_data = list(filter(None, songs_data))
-    chords_data = [[x['chords'], x['url']] for x in songs_data]
-    selected_chords = compare_chords(chords_data)
-    return selected_chords
+    chords_data = [s['chords'] for s in songs_data]
+    selected_idx = compare_chords(chords_data)
+    
+    return songs_data[selected_idx]
 
 if __name__ == "__main__":
-    chords = song_handler("Батарейка")
-    print(chords)
+    result = song_handler("Вахтерам")
+    
+    if result:
+        print(result)
