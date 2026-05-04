@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QLineEdit, QPushButton, QTextEdit, QListWidget, QListWidgetItem,
     QStackedWidget, QTabWidget, QDialog, QFormLayout, QGroupBox, QSizeGrip,
-    QMessageBox
+    QMessageBox, QInputDialog, QMenu
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QPixmap
@@ -64,8 +64,9 @@ class ChordFinderClient(QMainWindow):
         self.token = None
         self.user_id = None
         self.username = None
-        self.user_role = None  # ✅ Добавлено: роль пользователя
+        self.user_role = None
         self.toast = ToastNotification("", self)
+        self.current_playlist_id = None  # ✅ Для отслеживания текущего плейлиста
         
         self.load_session()
         self.central_widget = QWidget()
@@ -102,7 +103,6 @@ class ChordFinderClient(QMainWindow):
             QTabWidget::pane { border: 1px solid #333; border-radius: 4px; }
             QTabBar::tab { background-color: #1e1e1e; color: #aaa; padding: 9px 15px; border: 1px solid #333; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; }
             QTabBar::tab:selected { background-color: #252525; color: white; border-top: 2px solid #0078d4; }
-            /* Стиль для кнопки удаления в админке */
             .btn-delete { background-color: #c0392b; color: white; border: none; border-radius: 4px; padding: 6px 12px; font-weight: 500; }
             .btn-delete:hover { background-color: #a93226; }
         """)
@@ -117,7 +117,7 @@ class ChordFinderClient(QMainWindow):
                 self.token = data.get('access_token')
                 self.user_id = data.get('user_id')
                 self.username = data.get('username', 'User')
-                self.user_role = data.get('role', 'user')  # ✅ Загружаем роль
+                self.user_role = data.get('role', 'user')
         except FileNotFoundError:
             pass
 
@@ -125,7 +125,7 @@ class ChordFinderClient(QMainWindow):
         self.token = token
         self.user_id = user_id
         self.username = username
-        self.user_role = role  # ✅ Сохраняем роль
+        self.user_role = role
         with open(TOKEN_FILE, 'w') as f:
             json.dump({'access_token': token, 'user_id': user_id, 'username': username, 'role': role}, f)
 
@@ -137,6 +137,8 @@ class ChordFinderClient(QMainWindow):
         self.search_input.clear(); self.song_list.clear(); self.fav_list.clear()
         if hasattr(self, 'all_songs_list'): self.all_songs_list.clear()
         if hasattr(self, 'admin_songs_list'): self.admin_songs_list.clear()
+        if hasattr(self, 'playlists_list'): self.playlists_list.clear()
+        if hasattr(self, 'playlist_songs_list'): self.playlist_songs_list.clear()
         self.stacked_widget.setCurrentIndex(0)
 
     def check_auth_and_load(self):
@@ -274,124 +276,279 @@ class ChordFinderClient(QMainWindow):
         al.addLayout(page_layout)
         self.current_page = 0; self.songs_per_page = 20
         
-        # ✅ НОВАЯ ВКЛАДКА: АДМИН (только для админов)
-        admin_tab = QWidget(); admin_lay = QVBoxLayout(admin_tab)
+        # ✅ ВКЛАДКА ПЛЕЙЛИСТЫ
+        playlists_tab = QWidget(); pl = QVBoxLayout(playlists_tab)
         
-        # Заголовок
+        # Панель управления
+        pl_controls = QHBoxLayout()
+        btn_create = QPushButton("➕ Новый плейлист")
+        btn_create.setFixedWidth(150)
+        btn_create.clicked.connect(self.create_playlist_dialog)
+        btn_refresh_pl = QPushButton("↻ Обновить")
+        btn_refresh_pl.setFixedWidth(120)
+        btn_refresh_pl.clicked.connect(self.load_playlists)
+        pl_controls.addWidget(btn_create); pl_controls.addStretch(); pl_controls.addWidget(btn_refresh_pl)
+        pl.addLayout(pl_controls)
+        
+        # Список плейлистов
+        self.playlists_list = QListWidget()
+        self.playlists_list.itemDoubleClicked.connect(self.show_playlist_songs)
+        self.playlists_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.playlists_list.customContextMenuRequested.connect(self.show_playlist_context_menu)
+        pl.addWidget(self.playlists_list)
+        
+        # Список песен в плейлисте (скрыт по умолчанию)
+        self.playlist_songs_widget = QWidget()
+        self.playlist_songs_widget.hide()
+        pl_songs_layout = QVBoxLayout(self.playlist_songs_widget)
+        
+        pl_header = QHBoxLayout()
+        self.lbl_playlist_title = QLabel("")
+        self.lbl_playlist_title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        btn_back = QPushButton("← Назад")
+        btn_back.setFixedWidth(100)
+        btn_back.clicked.connect(self.hide_playlist_songs)
+        pl_header.addWidget(btn_back); pl_header.addWidget(self.lbl_playlist_title); pl_header.addStretch()
+        pl_songs_layout.addLayout(pl_header)
+        
+        self.playlist_songs_list = QListWidget()
+        self.playlist_songs_list.itemDoubleClicked.connect(self.show_song_details)
+        self.playlist_songs_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.playlist_songs_list.customContextMenuRequested.connect(self.show_playlist_song_context_menu)
+        pl_songs_layout.addWidget(self.playlist_songs_list)
+        
+        pl.addWidget(self.playlist_songs_widget)
+        
+        # --- ВКЛАДКА АДМИН ---
+        admin_tab = QWidget(); admin_lay = QVBoxLayout(admin_tab)
         admin_title = QLabel("🔐 Панель администратора")
         admin_title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         admin_title.setStyleSheet("color: #e74c3c; padding: 10px;")
         admin_lay.addWidget(admin_title)
-        
-        # Список песен с кнопками удаления
         self.admin_songs_list = QListWidget()
         self.admin_songs_list.setStyleSheet("QListWidget { background-color: #1a1a1a; border: 1px solid #333; color: #ccc; }")
         admin_lay.addWidget(self.admin_songs_list)
-        
-        # Панель управления
         admin_controls = QHBoxLayout()
         btn_refresh_admin = QPushButton("↻ Обновить список")
         btn_refresh_admin.setFixedWidth(150)
         btn_refresh_admin.clicked.connect(self.load_admin_songs)
-        admin_controls.addWidget(btn_refresh_admin)
-        admin_controls.addStretch()
+        admin_controls.addWidget(btn_refresh_admin); admin_controls.addStretch()
         admin_lay.addLayout(admin_controls)
         
-        # Добавляем вкладку (пока скрыта, покажем после проверки роли)
+        # Добавляем вкладки
         self.admin_tab_index = tabs.addTab(admin_tab, "🔐 Админ")
-        tabs.setTabVisible(self.admin_tab_index, False)  # Скрыта по умолчанию
-        
-        tabs.addTab(search_tab, "Поиск"); tabs.addTab(fav_tab, "Избранное"); tabs.addTab(all_tab, "Все песни")
+        tabs.setTabVisible(self.admin_tab_index, False)
+        tabs.addTab(search_tab, "Поиск"); tabs.addTab(fav_tab, "Избранное")
+        tabs.addTab(all_tab, "Все песни"); tabs.addTab(playlists_tab, "🎵 Плейлисты")
         lay.addWidget(tabs)
         
-        # ✅ Показываем админ-вкладку, если пользователь — админ
         if self.user_role == "admin":
             tabs.setTabVisible(self.admin_tab_index, True)
-            self.load_admin_songs()  # Загружаем список при старте
+            self.load_admin_songs()
         
         return w
 
-    def load_admin_songs(self):
-        """Загружает список всех песен для админ-панели"""
-        self.admin_songs_list.clear()
-        self.admin_songs_list.addItem("Загрузка...")
+    # ========================================================================
+    # ПЛЕЙЛИСТЫ: ЛОГИКА
+    # ========================================================================
+    
+    def load_playlists(self):
+        """Загружает список плейлистов текущего пользователя"""
+        self.playlists_list.clear()
+        self.playlists_list.addItem("Загрузка...")
         QApplication.processEvents()
         
-        # Загружаем все песни (без пагинации для админа, или с большой лимитой)
-        res = self.api_request("GET", "/admin/users")  # ✅ Или /songs если есть такой эндпоинт
-        # Если эндпоинт /admin/users возвращает пользователей, а не песни — используйте /songs
-        # Исправленный запрос:
-        res = self.api_request("GET", "/songs?limit=200")  # Загружаем до 200 песен
+        res = self.api_request("GET", "/playlists")
+        self.playlists_list.clear()
         
-        self.admin_songs_list.clear()
         if res is not None:
             if not res:
-                self.admin_songs_list.addItem("Список пуст")
+                self.playlists_list.addItem("Нет плейлистов")
             else:
-                for s in res:
-                    # Создаём виджет строки с песней и кнопкой удаления
-                    item_widget = QWidget()
-                    item_layout = QHBoxLayout(item_widget)
-                    item_layout.setContentsMargins(5, 5, 5, 5)
-                    
-                    # Текст песни
-                    song_label = QLabel(f"{s['artist']} — {s['title']}")
-                    song_label.setStyleSheet("color: #e0e0e0;")
-                    item_layout.addWidget(song_label, 1)  # Растягивается
-                    
-                    # Кнопка удаления
-                    del_btn = QPushButton("🗑️")
-                    del_btn.setFixedSize(32, 32)
-                    del_btn.setStyleSheet("""
-                        QPushButton { background-color: #c0392b; color: white; border: none; border-radius: 4px; font-size: 14px; }
-                        QPushButton:hover { background-color: #a93226; }
-                    """)
-                    del_btn.setToolTip("Удалить песню")
-                    del_btn.clicked.connect(lambda checked, sid=s['id'], artist=s['artist'], title=s['title']: self.delete_song(sid, artist, title))
-                    item_layout.addWidget(del_btn)
-                    
-                    # Добавляем виджет в список
-                    list_item = QListWidgetItem()
-                    list_item.setSizeHint(item_widget.sizeHint())
-                    self.admin_songs_list.addItem(list_item)
-                    self.admin_songs_list.setItemWidget(list_item, item_widget)
+                for pl in res:
+                    it = QListWidgetItem(f"🎵 {pl['name']}")
+                    it.setData(Qt.ItemDataRole.UserRole, pl['id'])
+                    it.setToolTip(f"ID: {pl['id']}\nСоздан: {pl.get('created_at', 'Неизвестно')}")
+                    self.playlists_list.addItem(it)
         else:
-            self.admin_songs_list.addItem("Ошибка загрузки")
+            self.playlists_list.addItem("Ошибка загрузки")
 
-    def delete_song(self, song_id: int, artist: str, title: str):
-        """Удаляет песню из БД с подтверждением"""
-        # Диалог подтверждения
+    def create_playlist_dialog(self):
+        """Диалог создания нового плейлиста"""
+        name, ok = QInputDialog.getText(self, "Новый плейлист", "Введите название плейлиста:")
+        if ok and name.strip():
+            res = self.api_request("POST", "/playlists", {"name": name.strip()})
+            if res:
+                self.toast.setText(f"Плейлист '{name}' создан")
+                self.toast.show_toast()
+                self.load_playlists()
+            else:
+                self.toast.setText("Ошибка создания плейлиста")
+                self.toast.show_toast()
+
+    def show_playlist_songs(self, item):
+        """Показывает песни в выбранном плейлисте"""
+        playlist_id = item.data(Qt.ItemDataRole.UserRole)
+        if not playlist_id:
+            return
+        
+        self.current_playlist_id = playlist_id
+        self.playlists_list.hide()
+        self.playlist_songs_widget.show()
+        
+        self.playlist_songs_list.clear()
+        self.playlist_songs_list.addItem("Загрузка...")
+        QApplication.processEvents()
+        
+        res = self.api_request("GET", f"/playlists/{playlist_id}/songs")
+        self.playlist_songs_list.clear()
+        
+        if res is not None:
+            if not res:
+                self.playlist_songs_list.addItem("Плейлист пуст")
+            else:
+                self.lbl_playlist_title.setText(f"🎵 {item.text().replace('🎵 ', '')}")
+                for s in res:
+                    h = s.get('hits', 0)
+                    it = QListWidgetItem(f"{s['artist']} — {s['title']} | 👁️ {h:,}" if h > 0 else f"{s['artist']} — {s['title']}")
+                    it.setData(Qt.ItemDataRole.UserRole, s['id'])
+                    self.playlist_songs_list.addItem(it)
+        else:
+            self.playlist_songs_list.addItem("Ошибка загрузки")
+            self.lbl_playlist_title.setText("Ошибка")
+
+    def hide_playlist_songs(self):
+        """Возвращает к списку плейлистов"""
+        self.playlist_songs_widget.hide()
+        self.playlists_list.show()
+        self.lbl_playlist_title.setText("")
+        self.current_playlist_id = None
+
+    def show_playlist_context_menu(self, position):
+        """Контекстное меню для плейлиста: удалить"""
+        item = self.playlists_list.itemAt(position)
+        if not item:
+            return
+        
+        playlist_id = item.data(Qt.ItemDataRole.UserRole)
+        if not playlist_id:
+            return
+        
+        menu = QMenu()
+        delete_action = menu.addAction("🗑️ Удалить плейлист")
+        
+        action = menu.exec(self.playlists_list.mapToGlobal(position))
+        if action == delete_action:
+            self.delete_playlist(playlist_id, item.text().replace('🎵 ', ''))
+
+    def delete_playlist(self, playlist_id: int, name: str):
+        """Удаляет плейлист с подтверждением"""
         confirm = QMessageBox(self)
-        confirm.setWindowTitle("Подтверждение удаления")
-        confirm.setText(f"Удалить песню?\n\n🎤 {artist}\n🎵 {title}")
-        confirm.setInformativeText("Это действие нельзя отменить.")
+        confirm.setWindowTitle("Удаление плейлиста")
+        confirm.setText(f"Удалить плейлист '{name}'?")
+        confirm.setInformativeText("Все песни будут удалены из плейлиста (но не из базы).")
         confirm.setIcon(QMessageBox.Icon.Warning)
         confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         confirm.setDefaultButton(QMessageBox.StandardButton.No)
-        confirm.setStyleSheet("""
-            QMessageBox { background-color: #1e1e1e; color: #e0e0e0; }
-            QPushButton { background-color: #0078d4; color: white; padding: 8px 16px; border-radius: 4px; }
-            QPushButton:hover { background-color: #005a9e; }
-        """)
         
         if confirm.exec() == QMessageBox.StandardButton.Yes:
-            # Выполняем удаление
-            res = self.api_request("DELETE", f"/songs/{song_id}")
+            res = self.api_request("DELETE", f"/playlists/{playlist_id}")
             if res:
-                self.toast.setText(f"Песня '{title}' удалена")
+                self.toast.setText(f"Плейлист '{name}' удалён")
                 self.toast.show_toast()
-                self.load_admin_songs()  # Перезагружаем список
-                self.load_all_songs(self.current_page)  # Обновляем и вкладку "Все песни"
+                self.load_playlists()
             else:
-                self.toast.setText("Ошибка при удалении")
+                self.toast.setText("Ошибка удаления плейлиста")
                 self.toast.show_toast()
+
+    def show_playlist_song_context_menu(self, position):
+        """Контекстное меню для песни в плейлисте: удалить из плейлиста"""
+        if not self.current_playlist_id:
+            return
+        
+        item = self.playlist_songs_list.itemAt(position)
+        if not item:
+            return
+        
+        song_id = item.data(Qt.ItemDataRole.UserRole)
+        song_title = item.text().split(' | ')[0] if ' | ' in item.text() else item.text()
+        
+        if not song_id:
+            return
+        
+        menu = QMenu()
+        remove_action = menu.addAction("🗑️ Убрать из плейлиста")
+        
+        action = menu.exec(self.playlist_songs_list.mapToGlobal(position))
+        if action == remove_action:
+            res = self.api_request("DELETE", f"/playlists/{self.current_playlist_id}/songs/{song_id}")
+            if res:
+                self.toast.setText(f"'{song_title}' удалена из плейлиста")
+                self.toast.show_toast()
+                self.show_playlist_songs(self.playlists_list.currentItem())
+            else:
+                self.toast.setText("Ошибка удаления")
+                self.toast.show_toast()
+
+    def add_song_to_playlist_dialog(self, song_id: int, song_title: str):
+        """Диалог выбора плейлиста для добавления песни"""
+        res = self.api_request("GET", "/playlists")
+        
+        if not res:
+            self.toast.setText("Нет доступных плейлистов")
+            self.toast.show_toast()
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Добавить в плейлист: {song_title}")
+        dialog.resize(400, 300)
+        dialog.setStyleSheet(self.styleSheet())
+        
+        lay = QVBoxLayout(dialog)
+        lay.addWidget(QLabel("Выберите плейлист:"))
+        
+        playlists_list = QListWidget()
+        for pl in res:
+            it = QListWidgetItem(pl['name'])
+            it.setData(Qt.ItemDataRole.UserRole, pl['id'])
+            playlists_list.addItem(it)
+        lay.addWidget(playlists_list)
+        
+        btn_add = QPushButton("Добавить")
+        btn_add.clicked.connect(lambda: self._do_add_to_playlist(
+            playlists_list.currentItem(), song_id, song_title, dialog))
+        lay.addWidget(btn_add)
+        
+        dialog.exec()
+
+    def _do_add_to_playlist(self, item, song_id: int, song_title: str, dialog: QDialog):
+        """Выполняет добавление песни в плейлист"""
+        if not item:
+            self.toast.setText("Выберите плейлист")
+            self.toast.show_toast()
+            return
+        
+        playlist_id = item.data(Qt.ItemDataRole.UserRole)
+        res = self.api_request("POST", f"/playlists/{playlist_id}/songs/{song_id}")
+        
+        if res:
+            self.toast.setText(f"'{song_title}' добавлена в '{item.text()}'")
+            self.toast.show_toast()
+            dialog.accept()
+        else:
+            self.toast.setText("Ошибка добавления")
+            self.toast.show_toast()
+
+    # ========================================================================
+    # ОСНОВНЫЕ МЕТОДЫ
+    # ========================================================================
 
     def show_main_app(self):
         self.stacked_widget.setCurrentIndex(2)
         self.lbl_user.setText(f"Пользователь: {self.username} (ID: {self.user_id})")
         self.load_favorites()
         self.load_all_songs(0)
-        # ✅ Показываем админ-вкладку после загрузки данных пользователя
+        self.load_playlists()
         if self.user_role == "admin":
             tabs = self.stacked_widget.currentWidget().findChild(QTabWidget)
             if tabs:
@@ -454,9 +611,65 @@ class ChordFinderClient(QMainWindow):
                     it.setData(Qt.ItemDataRole.UserRole, s['id']); self.fav_list.addItem(it)
         else: self.fav_list.addItem("Ошибка загрузки")
 
-    # ========================================================================
-    # ДЕТАЛИ ПЕСНИ
-    # ========================================================================
+    def load_admin_songs(self):
+        """Загружает список всех песен для админ-панели"""
+        self.admin_songs_list.clear()
+        self.admin_songs_list.addItem("Загрузка...")
+        QApplication.processEvents()
+        res = self.api_request("GET", "/songs?limit=200")
+        self.admin_songs_list.clear()
+        if res is not None:
+            if not res:
+                self.admin_songs_list.addItem("Список пуст")
+            else:
+                for s in res:
+                    item_widget = QWidget()
+                    item_layout = QHBoxLayout(item_widget)
+                    item_layout.setContentsMargins(5, 5, 5, 5)
+                    song_label = QLabel(f"{s['artist']} — {s['title']}")
+                    song_label.setStyleSheet("color: #e0e0e0;")
+                    item_layout.addWidget(song_label, 1)
+                    del_btn = QPushButton("🗑️")
+                    del_btn.setFixedSize(32, 32)
+                    del_btn.setStyleSheet("""
+                        QPushButton { background-color: #c0392b; color: white; border: none; border-radius: 4px; font-size: 14px; }
+                        QPushButton:hover { background-color: #a93226; }
+                    """)
+                    del_btn.setToolTip("Удалить песню")
+                    del_btn.clicked.connect(lambda checked, sid=s['id'], artist=s['artist'], title=s['title']: self.delete_song(sid, artist, title))
+                    item_layout.addWidget(del_btn)
+                    list_item = QListWidgetItem()
+                    list_item.setSizeHint(item_widget.sizeHint())
+                    self.admin_songs_list.addItem(list_item)
+                    self.admin_songs_list.setItemWidget(list_item, item_widget)
+        else:
+            self.admin_songs_list.addItem("Ошибка загрузки")
+
+    def delete_song(self, song_id: int, artist: str, title: str):
+        """Удаляет песню из БД с подтверждением"""
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("Подтверждение удаления")
+        confirm.setText(f"Удалить песню?\n\n🎤 {artist}\n🎵 {title}")
+        confirm.setInformativeText("Это действие нельзя отменить.")
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        confirm.setDefaultButton(QMessageBox.StandardButton.No)
+        confirm.setStyleSheet("""
+            QMessageBox { background-color: #1e1e1e; color: #e0e0e0; }
+            QPushButton { background-color: #0078d4; color: white; padding: 8px 16px; border-radius: 4px; }
+            QPushButton:hover { background-color: #005a9e; }
+        """)
+        if confirm.exec() == QMessageBox.StandardButton.Yes:
+            res = self.api_request("DELETE", f"/songs/{song_id}")
+            if res:
+                self.toast.setText(f"Песня '{title}' удалена")
+                self.toast.show_toast()
+                self.load_admin_songs()
+                self.load_all_songs(self.current_page)
+            else:
+                self.toast.setText("Ошибка при удалении")
+                self.toast.show_toast()
+
     def show_song_details(self, item):
         sid = item.data(Qt.ItemDataRole.UserRole)
         if not sid: return
@@ -544,10 +757,12 @@ class ChordFinderClient(QMainWindow):
         tl.addWidget(txt)
         clayout.addWidget(tg)
 
+        # Кнопки: избранное + плейлисты
         bl = QHBoxLayout()
         b1 = QPushButton("В избранное"); b1.clicked.connect(lambda: self.toggle_favorite(sid, True, dlg))
         b2 = QPushButton("Убрать из избранного"); b2.clicked.connect(lambda: self.toggle_favorite(sid, False, dlg))
-        bl.addWidget(b1); bl.addWidget(b2); bl.addStretch()
+        b3 = QPushButton("🎵 В плейлист"); b3.clicked.connect(lambda: self.add_song_to_playlist_dialog(sid, sd['title']))
+        bl.addWidget(b1); bl.addWidget(b2); bl.addWidget(b3); bl.addStretch()
         clayout.addLayout(bl)
         main_lay.addWidget(content, 1)
 
@@ -568,18 +783,13 @@ class ChordFinderClient(QMainWindow):
                 self.toast.setText("Удалено из избранного"); self.toast.show_toast()
                 dlg.reject(); self.load_favorites()
 
-    # ========================================================================
-    # 2FA
-    # ========================================================================
     def setup_2fa(self):
         sd = self.api_request("POST", "/auth/2fa/setup")
         if not sd: return
         sk, qr = sd.get('secret'), sd.get('qr_code_uri')
         if not qr: self.toast.setText("Сервер не вернул QR-код"); self.toast.show_toast(); return
-
         img = qrcode.make(qr); buf = io.BytesIO(); img.save(buf, "PNG"); buf.seek(0)
         pix = QPixmap(); pix.loadFromData(buf.getvalue())
-
         dlg = QDialog(self); dlg.setWindowTitle("Настройка 2FA"); dlg.resize(400, 480); dlg.setStyleSheet(self.styleSheet())
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel("Отсканируйте QR-код в приложении-аутентификаторе:"))

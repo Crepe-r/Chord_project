@@ -22,7 +22,7 @@ from database import (
     create_user, get_user, get_all_users, delete_user, update_user,
     add_to_favorites, remove_from_favorites, get_favorites,
     create_playlist, add_to_playlist, get_playlist_songs, delete_playlist,
-    increment_song_hits, User, Song, Playlist
+    increment_song_hits, User, Song, Playlist, remove_from_playlist
 )
 
 # =============================================================================
@@ -553,6 +553,22 @@ async def get_playlist_songs_endpoint(
     songs = await db_run(get_playlist_songs, db, playlist_id)
     return songs
 
+@app.delete("/api/playlists/{playlist_id}/songs/{song_id}")
+async def remove_song_from_playlist_endpoint(
+    playlist_id: int,
+    song_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    playlist = await db_run(lambda: db.query(Playlist).filter(Playlist.id == playlist_id).first())
+    if not playlist or playlist.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+    
+    success = await db_run(remove_from_playlist, db, playlist_id, song_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Песня не в плейлисте")
+    return {"message": "Песня удалена из плейлиста"}
+
 @app.delete("/api/playlists/{playlist_id}")
 async def delete_playlist_endpoint(
     playlist_id: int,
@@ -563,6 +579,15 @@ async def delete_playlist_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="Плейлист не найден или доступ запрещен")
     return {"message": "Плейлист удален"}
+
+@app.get("/api/playlists", response_model=List[PlaylistResponse])
+async def get_user_playlists(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Возвращает список плейлистов текущего пользователя"""
+    playlists = await db_run(lambda: db.query(Playlist).filter(Playlist.owner_id == current_user.id).all())
+    return playlists
 
 # =============================================================================
 # ЭНДПОИНТЫ: АДМИН
